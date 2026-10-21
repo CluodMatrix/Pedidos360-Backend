@@ -10,12 +10,16 @@
 //  - Precios y total los calcula el backend a partir de la tabla de productos.
 //  - Crear pedido descuenta stock y guarda el pedido en UNA transacción (sin sobreventa).
 //  - Cancelar un pedido devuelve el stock en la misma transacción que cambia el estado.
+//  - Una vez guardado el pedido, se publica un evento en SNS (EP2). El productor
+//    no conoce a los consumidores: el fan-out y los filtros los decide el topic.
 import { randomUUID } from 'node:crypto';
-import { BatchGetCommand, GetCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
+import { BatchGetCommand, GetCommand, QueryCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 
 import { authorize } from '../shared/auth.js';
-import { INDEX_PEDIDOS_CLIENTE, TABLE_PEDIDOS, TABLE_PRODUCTOS, db, queryAll, scanAll } from '../shared/dynamo.js';
+import { INDEX_PEDIDOS_CLIENTE, TABLE_NOTIFICACIONES, TABLE_PEDIDOS, TABLE_PRODUCTOS, db, queryAll, scanAll } from '../shared/dynamo.js';
 import { HttpError, badRequest, conflict, createHandler, json, notFound, parseBody } from '../shared/http.js';
+import { config } from '../shared/config.js';
+import { eventoDeEstado, publicarEvento } from '../shared/sns.js';
 
 const ESTADOS = ['CREADO', 'ACEPTADO', 'EN_PREPARACION', 'DESPACHADO', 'ENTREGADO', 'CANCELADO'];
 
@@ -107,7 +111,91 @@ function cancelacionPorCondicion(err, lineas) {
   return conflict('El pedido no pudo procesarse por un cambio simultáneo. Inténtalo nuevamente.');
 }
 
+/**
+ * Publica un evento del pedido en el SNS Topic.
+ *
+ * El pedido ya está guardado en DynamoDB cuando se llama a esta función, así
+ * que el pedido NO puede fallar por un problema de mensajería: si la
+ * publicación falla, se registra el error y se responde igual. Perder un
+ * correo es un incidente; perder un pedido cobrado es peor.
+ *
+ * (En producción lo correcto es un patrón "outbox": se escribe el evento en la
+ * misma transacción que el pedido y un reproductor lo publica a SNS.)
+ */
+let avisoSinTopic = false;
+
+async function notificarCambio(pedido, tipoEvento) {
+  if (!config.topicArn) {
+    // La mensajería no está desplegada todavía: no es un fallo del pedido.
+    if (!avisoSinTopic) {
+      avisoSinTopic = true;
+      console.warn(
+        `Sin TOPIC_ARN configurado: no se publican eventos (pedido ${pedido.id}, "${tipoEvento}").`,
+      );
+    }
+    return;
+  }
+
+  try {
+    const { eventId } = await publicarEvento({
+      tipoEvento,
+      pedidoId: pedido.id,
+      datos: {
+        estado: pedido.estado,
+        total: pedido.total,
+        clienteId: pedido.clienteId,
+        clienteNombre: pedido.clienteNombre,
+        productos: pedido.productos,
+      },
+    });
+    console.log(`Evento "${tipoEvento}" publicado para el pedido ${pedido.id} (${eventId}).`);
+  } catch (err) {
+    console.error(
+      `No se pudo publicar el evento "${tipoEvento}" del pedido ${pedido.id}: ${err.message}. ` +
+        'El pedido quedó guardado en DynamoDB.',
+    );
+  }
+}
+
 // ---------------------------------------------------------------- handlers
+
+/**
+ * GET /notificaciones
+ *
+ * Eventos ya consumidos por la Lambda de notificaciones, del mas reciente al
+ * mas antiguo. Es lo que la interfaz consulta para mostrar los avisos.
+ *
+ * Se lee con un Query sobre el GSI (clave constante + fecha), no con un Scan
+ * de toda la tabla.
+ */
+async function listarNotificaciones({ event }) {
+  authorize(event, { roles: LECTURA, scope: 'orders.read' });
+
+  const { Items } = await db.send(
+    new QueryCommand({
+      TableName: TABLE_NOTIFICACIONES,
+      IndexName: 'notificaciones-fecha-index',
+      KeyConditionExpression: '#c = :c',
+      ExpressionAttributeNames: { '#c': 'clave' },
+      ExpressionAttributeValues: { ':c': 'notificaciones' },
+      ScanIndexForward: false, // del mas reciente al mas antiguo
+      Limit: 20,
+    }),
+  );
+
+  return json(
+    200,
+    (Items ?? []).map((item) => ({
+      id: item.id,
+      tipo: item.tipo,
+      pedidoId: item.pedidoId,
+      clienteNombre: item.clienteNombre,
+      total: item.total,
+      texto: item.texto,
+      fecha: item.fecha,
+    })),
+  );
+}
 
 async function listar({ event }) {
   const identity = authorize(event, { roles: LECTURA, scope: 'orders.read' });
@@ -188,6 +276,10 @@ async function crear({ event }) {
   } catch (err) {
     throw cancelacionPorCondicion(err, detalle) ?? err;
   }
+
+  // El pedido ya está en DynamoDB: ahora se avisa al resto del sistema.
+  await notificarCambio(pedido, eventoDeEstado('CREADO'));
+
   return json(201, toPedido(pedido));
 }
 
@@ -249,7 +341,14 @@ async function cambiarEstado({ event, params }) {
     }
     throw err;
   }
-  return json(200, toPedido({ ...actual, estado, fechaActualizacion: ahora }));
+
+  const actualizado = { ...actual, estado, fechaActualizacion: ahora };
+  // PedidoAceptado y PedidoDespachado son los eventos que espera el topic
+  // (las filter policies de q-kitchen y q-invoice los filtran por tipo).
+  const tipoEvento = eventoDeEstado(estado);
+  if (tipoEvento) await notificarCambio(actualizado, tipoEvento);
+
+  return json(200, toPedido(actualizado));
 }
 
 export const handler = createHandler([
@@ -257,4 +356,5 @@ export const handler = createHandler([
   ['POST', '/pedidos', crear],
   ['GET', '/pedidos/{id}', obtener],
   ['PUT', '/pedidos/{id}/estado', cambiarEstado],
+  ['GET', '/notificaciones', listarNotificaciones],
 ]);

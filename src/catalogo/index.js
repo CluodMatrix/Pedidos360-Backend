@@ -15,6 +15,10 @@ import { TABLE_PRODUCTOS, db, scanAll } from '../shared/dynamo.js';
 import { badRequest, createHandler, json, noContent, notFound, parseBody } from '../shared/http.js';
 
 const LECTURA = ['Admin', 'Operador'];
+// Vista de escaparate: la que consulta el Cliente al comprar. Ve los mismos
+// datos publicos del producto, pero no los campos de gestion (fechas), y puede
+// leerlos aunque su rol no le de acceso al catalogo administrativo.
+const LECTURA_COMPRA = ['Admin', 'Operador', 'Cliente'];
 const ESCRITURA = ['Admin'];
 
 const MAX_NOMBRE = 120;
@@ -91,6 +95,32 @@ async function listar({ event }) {
   return json(200, items.map(toProducto));
 }
 
+/**
+ * GET /catalogo/comprar
+ *
+ * Catalogo de escaparate. Lo usa la pantalla de compra del Cliente, que si
+ * puede comprar cualquier producto pero no debe ver el catalogo de gestion
+ * (precios internos, fechas de alta, etc).
+ *
+ * Devuelve solo los datos publicos y el stock REAL, para que la pantalla no
+ * muestre informacion desactualizada.
+ */
+async function listarParaComprar({ event }) {
+  authorize(event, { roles: LECTURA_COMPRA, scope: 'catalog.read' });
+  const items = await scanAll({ TableName: TABLE_PRODUCTOS });
+  items.sort((a, b) => String(a.nombre).localeCompare(String(b.nombre), 'es'));
+  return json(
+    200,
+    items.map((item) => ({
+      id: item.id,
+      nombre: item.nombre,
+      descripcion: item.descripcion,
+      precio: item.precio,
+      stock: item.stock,
+    })),
+  );
+}
+
 async function obtener({ event, params }) {
   authorize(event, { roles: LECTURA, scope: 'catalog.read' });
   const { Item } = await db.send(new GetCommand({ TableName: TABLE_PRODUCTOS, Key: { id: validarId(params.id) } }));
@@ -163,6 +193,10 @@ async function eliminar({ event, params }) {
 export const handler = createHandler([
   ['GET', '/catalogo', listar],
   ['POST', '/catalogo', crear],
+  // OJO: la ruta estatica va ANTES que '/catalogo/{id}'. El router de
+  // src/shared/http.js usa la PRIMERA ruta que coincide, asi que si se
+  // invirtieran, "comprar" se interpretaria como un id de producto.
+  ['GET', '/catalogo/comprar', listarParaComprar],
   ['GET', '/catalogo/{id}', obtener],
   ['PUT', '/catalogo/{id}', actualizar],
   ['DELETE', '/catalogo/{id}', eliminar],

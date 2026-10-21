@@ -7,14 +7,23 @@
   "engines": { "node": ">=20" },
   "scripts": {
     "build": "node scripts/build.js",
-    "test": "node --test test/api.test.js",
+    "test": "node --test test/api.test.js test/mensajeria.test.js",
     "tables": "node scripts/create-tables.js",
     "seed": "node scripts/seed.js",
-    "deploy": "node scripts/build.js && node scripts/deploy.js"
+    "messaging": "node scripts/create-messaging.js",
+    "messaging:check": "node scripts/check-messaging.js",
+    "probar": "node scripts/probar-topologia.js",
+    "probar:integracion": "node scripts/probar-integracion.js",
+    "deploy": "node scripts/build.js && node scripts/deploy.js",
+    "deploy:messaging": "node scripts/build.js && node scripts/deploy.js --mensajeria"
   },
   "devDependencies": {
+    "@aws-sdk/client-apigatewayv2": "^3.700.0",
+    "@aws-sdk/client-cloudwatch-logs": "^3.700.0",
     "@aws-sdk/client-dynamodb": "^3.700.0",
     "@aws-sdk/client-lambda": "^3.700.0",
+    "@aws-sdk/client-sns": "^3.700.0",
+    "@aws-sdk/client-sqs": "^3.700.0",
     "@aws-sdk/client-sts": "^3.700.0",
     "@aws-sdk/lib-dynamodb": "^3.700.0",
     "adm-zip": "^0.5.16",
