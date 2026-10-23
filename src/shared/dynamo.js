@@ -6,6 +6,7 @@ import { DynamoDBDocumentClient, QueryCommand, ScanCommand } from '@aws-sdk/lib-
 
 export const TABLE_PRODUCTOS = process.env.TABLE_PRODUCTOS ?? 'Pedidos360-Productos';
 export const TABLE_PEDIDOS = process.env.TABLE_PEDIDOS ?? 'Pedidos360-Pedidos';
+export const TABLE_NOTIFICACIONES = process.env.TABLA_NOTIFICACIONES ?? 'Pedidos360-Notificaciones';
 export const INDEX_PEDIDOS_CLIENTE = 'clienteId-fechaCreacion-index';
 
 export const db = DynamoDBDocumentClient.from(new DynamoDBClient({}), {
